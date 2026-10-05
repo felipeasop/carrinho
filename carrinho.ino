@@ -1,27 +1,27 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include "esp_camera.h"
+#include "esp_timer.h"
 
-// ==================== CONFIGURACAO PRINCIPAL ====================
-// Edite aqui os valores do projeto antes de gravar o sketch.
-
-// Wi-Fi criado pela ESP32-CAM.
-const char *AP_SSID = "Carrinho-CAM";
+// Firmware fixo: camera, rede, PWM e confirmacao dos pulsos.
+// O painel e o algoritmo ficam em web/ no notebook.
+const char *AP_SSID = "carrinho";
 const char *AP_PASSWORD = "carrinho123";
-
-// Velocidade inicial (0..255 PWM); tambem ajustavel ao vivo pelo painel.
-const int velocidade = 90;
 
 // L298N: PWM nas entradas ENA/ENB; IN1/IN3 fixam o sentido para frente.
 // IN2/IN4 não são usados pelo programa. Não há comando de ré.
 // Deixe -1 para testar somente câmera/rede. Preencha para usar o carrinho.
-const int ENA = -1; // PWM da roda esquerda
-const int IN1 = -1; // direção fixa para frente, roda esquerda
-const int IN3 = -1; // direção fixa para frente, roda direita
-const int ENB = -1; // PWM da roda direita
+const int ENA = 2; // PWM da roda esquerda
+const int IN1 = 14; // direção fixa para frente, roda esquerda
+const int IN3 = 13; // direção fixa para frente, roda direita
+const int ENB = 12; // PWM da roda direita
 
-// Limite de parada dos motores se os comandos do navegador cessarem.
-const unsigned long COMMAND_TIMEOUT_MS = 600;
+// Cada pulso termina na ESP32, mesmo se o navegador ou a rede travarem.
+const unsigned long COMMAND_TIMEOUT_MS = 1200;
+const unsigned long PULSE_MIN_MS = 60;
+const unsigned long PULSE_MAX_MS = 260;
+const unsigned long FRAME_MAX_AGE_MS = 250;
+const uint32_t MAX_PWM = 255;
 
 // Camera AI-Thinker ESP32-CAM. Altere somente para outro mapa de câmera.
 #define CAM_PWDN 32
@@ -46,89 +46,18 @@ const framesize_t CAMERA_FRAME_SIZE = FRAMESIZE_QQVGA; // 160 x 120
 const int CAMERA_JPEG_QUALITY = 25;
 const int CAMERA_FRAME_BUFFERS = 1;
 
-// ================== FIM DA CONFIGURACAO PRINCIPAL ==================
-
-static_assert(velocidade >= 0 && velocidade <= 255,
-              "velocidade deve estar entre 0 e 255");
-
 WebServer server(80);
-bool motorsEnabled = false;
+bool motorsEnabled = false, cameraReady = false;
 unsigned long lastCommandMs = 0;
+unsigned long pulseStoppedAt = 0, frameCapturedAt = 0;
+int64_t pulseStoppedUs = 0;
+uint32_t controlToken = 0, lastStepSeq = 0, completedSeq = 0, confirmedSeq = 0;
+uint32_t lastFrameId = 0, lastUsedFrameId = 0, frameAfterSeq = 0;
+bool pulseActive = false;
+esp_timer_handle_t pulseTimer = nullptr;
+portMUX_TYPE pulseMux = portMUX_INITIALIZER_UNLOCKED;
 
-const char INDEX_HTML[] PROGMEM = R"PAGE(<!doctype html>
-<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Carrinho seguidor de linha</title><style>
-:root{font-family:system-ui,sans-serif;color-scheme:dark;background:#101820;color:#eaf2f5}body{max-width:900px;margin:auto;padding:18px}
-.panel{background:#192731;border:1px solid #36505a;border-radius:12px;padding:16px}canvas{display:block;width:100%;background:#090d10;border-radius:8px;image-rendering:auto}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px;margin-top:14px}.stat{border:1px solid #36505a;border-radius:8px;padding:10px}.stat span{display:block;color:#adc1ca;font-size:.85rem}.stat strong{display:block;margin-top:4px}
-label{display:block;margin:16px 0 6px}input[type=range]{width:100%}#error{color:#ffb5a8;min-height:1.4em}.hint{color:#adc1ca;font-size:.9rem}
-</style></head><body><h1>Carrinho seguidor de linha</h1>
-<p class="hint">A imagem é analisada neste navegador. A ESP32 transmite JPEG em baixa resolução e recebe PWM por HTTP.</p>
-<main class="panel"><canvas id="video" width="160" height="120"></canvas>
-<label for="speed">Velocidade base: <strong><span id="speedValue">__VELOCIDADE__</span> / 255 PWM</strong></label>
-<input id="speed" type="range" min="0" max="255" value="__VELOCIDADE__">
-<p id="speedNote" class="hint">A correção acelera a roda externa, respeitando o máximo de 255.</p>
-<div class="grid">
-<div class="stat"><span>Conexão</span><strong id="connection">Conectando</strong></div>
-<div class="stat"><span>Ação</span><strong id="action">Parar</strong></div>
-<div class="stat"><span>Ajuste da curva</span><strong id="amount">0 PWM</strong></div>
-<div class="stat"><span>Roda esquerda</span><strong id="left">0 / 255</strong></div>
-<div class="stat"><span>Roda direita</span><strong id="right">0 / 255</strong></div>
-<div class="stat"><span>Saída dos motores</span><strong id="motorState">—</strong></div>
-<div class="stat"><span>Quadro recebido</span><strong id="frameBytes">—</strong></div>
-<div class="stat"><span>Tempo câmera / comando</span><strong><span id="latency">—</span> / <span id="commandLatency">—</span></strong></div>
-<div class="stat"><span>Quadros por segundo</span><strong id="fps">—</strong></div>
-</div><p id="error"></p></main>
-<script>
-const canvas=document.querySelector('#video'),ctx=canvas.getContext('2d',{willReadFrequently:true});
-const speed=document.querySelector('#speed');
-let active=true,frames=0,lastFpsTime=performance.now(),currentFps=0;
-speed.addEventListener('input',()=>{document.querySelector('#speedValue').textContent=speed.value;document.querySelector('#speedNote').textContent=Number(speed.value)===255?'Em 255 não sobra margem para acelerar na curva.':'A correção acelera a roda externa, respeitando o máximo de 255.'});
-
-function otsu(hist,total){let sum=0;for(let i=0;i<256;i++)sum+=i*hist[i];let sumB=0,wB=0,best=-1,threshold=0;
- for(let i=0;i<256;i++){wB+=hist[i];if(!wB)continue;let wF=total-wB;if(!wF)break;sumB+=i*hist[i];let d=sumB/wB-(sum-sumB)/wF,v=wB*wF*d*d;if(v>best){best=v;threshold=i}}
- return threshold}
-
-function findLine(image){const w=image.width,rh=image.height,n=w*rh,data=image.data,hist=new Uint32Array(256),gray=new Uint8Array(n);
- for(let y=0;y<rh;y++)for(let x=0;x<w;x++){let p=(y*w+x)*4,g=(data[p]*77+data[p+1]*150+data[p+2]*29)>>8;gray[y*w+x]=g;hist[g]++}
- const t=otsu(hist,n),mask=new Uint8Array(n);let dark=0;for(let i=0;i<n;i++){if(gray[i]<=t){mask[i]=1;dark++}}
- if(dark<n*.005||dark>n*.35)return{found:false};
- const queue=new Int32Array(n);let bestCount=0,bestX=0,bestY=0;
- for(let seed=0;seed<n;seed++){if(!mask[seed])continue;let head=0,tail=0,sx=0,sy=0;mask[seed]=0;queue[tail++]=seed;
-  while(head<tail){let i=queue[head++],x=i%w,y=(i/w)|0;sx+=x;sy+=y;
-   if(x>0&&mask[i-1]){mask[i-1]=0;queue[tail++]=i-1}if(x+1<w&&mask[i+1]){mask[i+1]=0;queue[tail++]=i+1}
-   if(y>0&&mask[i-w]){mask[i-w]=0;queue[tail++]=i-w}if(y+1<rh&&mask[i+w]){mask[i+w]=0;queue[tail++]=i+w}}
-  if(tail>bestCount){bestCount=tail;bestX=sx;bestY=sy}}
- if(bestCount<n*.005||bestCount>n*.35)return{found:false};
- const x=bestX/bestCount,y=bestY/bestCount,offset=Math.max(-1,Math.min(1,(x-w/2)/(w/2)));
- return{found:true,x,y,offset}}
-
-function commandFor(line){const base=Number(speed.value);if(!line.found||base===0)return{action:'parar',amount:0,left:0,right:0};
- if(Math.abs(line.offset)<.08)return{action:'frente',amount:0,left:base,right:base};
- const delta=Math.round(Math.abs(line.offset)*Math.min(120,255-base));
- if(line.offset<0)return{action:'esquerda',amount:delta,left:base,right:base+delta};
- return{action:'direita',amount:delta,left:base+delta,right:base}}
-
-function annotate(line,cmd){const w=canvas.width,h=canvas.height;ctx.strokeStyle='#a0a0a0';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(w/2,line.top);ctx.lineTo(w/2,h);ctx.moveTo(0,line.top);ctx.lineTo(w,line.top);ctx.stroke();
- if(line.found){ctx.fillStyle='#ffffff';ctx.beginPath();ctx.arc(line.x,line.top+line.y,4,0,Math.PI*2);ctx.fill()}
- ctx.fillStyle='rgba(0,0,0,.8)';ctx.fillRect(0,0,w,20);ctx.fillStyle='white';ctx.font='12px sans-serif';ctx.fillText(`${cmd.action.toUpperCase()}  ajuste ${cmd.amount}  L ${cmd.left} R ${cmd.right}`,5,14)}
-
-async function stopMotors(){try{await fetch('/command?left=0&right=0',{cache:'no-store',keepalive:true})}catch(_){}}
-async function loop(){if(!active)return;let started=performance.now();
- try{const response=await fetch('/capture?t='+Date.now(),{cache:'no-store'});if(!response.ok)throw Error('camera HTTP '+response.status);
-  const blob=await response.blob(),cameraMs=performance.now()-started,bitmap=await createImageBitmap(blob);canvas.width=bitmap.width;canvas.height=bitmap.height;ctx.drawImage(bitmap,0,0);bitmap.close();
-  const top=Math.floor(canvas.height*.62),line=findLine(ctx.getImageData(0,top,canvas.width,canvas.height-top));line.top=top;const cmd=commandFor(line);annotate(line,cmd);
-  const commandStart=performance.now();const control=await fetch(`/command?left=${cmd.left}&right=${cmd.right}`,{cache:'no-store'});if(!control.ok)throw Error('comando HTTP '+control.status);
-  const result=await control.json(),commandMs=performance.now()-commandStart;document.querySelector('#connection').textContent='Conectada';document.querySelector('#action').textContent=cmd.action;
-  document.querySelector('#amount').textContent=`${cmd.amount} PWM`;document.querySelector('#left').textContent=`${cmd.left} / 255`;document.querySelector('#right').textContent=`${cmd.right} / 255`;
-  document.querySelector('#motorState').textContent=result.motors_enabled?'Configurados':'Desativados (pinos)';document.querySelector('#frameBytes').textContent=`${blob.size} bytes`;
-  document.querySelector('#latency').textContent=`${cameraMs.toFixed(0)} ms`;document.querySelector('#commandLatency').textContent=`${commandMs.toFixed(0)} ms`;
-  frames++;let now=performance.now();if(now-lastFpsTime>=1000){currentFps=frames*1000/(now-lastFpsTime);frames=0;lastFpsTime=now}document.querySelector('#fps').textContent=currentFps.toFixed(1);
-  document.querySelector('#error').textContent='';
- }catch(error){document.querySelector('#connection').textContent='Desconectada';document.querySelector('#action').textContent='Parar';document.querySelector('#left').textContent='0 / 255';document.querySelector('#right').textContent='0 / 255';document.querySelector('#error').textContent=String(error);await stopMotors();await new Promise(resolve=>setTimeout(resolve,400))}
- if(active)setTimeout(loop,30)}
-window.addEventListener('pagehide',()=>{active=false;stopMotors()});loop();
-</script></body></html>)PAGE";
+// A pagina e a visao rodam no notebook (web/app.js).
 
 void stopMotors() {
   if (!motorsEnabled) return;
@@ -136,9 +65,28 @@ void stopMotors() {
   ledcWrite(ENB, 0);
 }
 
+void pulseTimerCallback(void *) {
+  stopMotors();
+  portENTER_CRITICAL(&pulseMux);
+  completedSeq = lastStepSeq;
+  pulseStoppedAt = millis();
+  pulseStoppedUs = esp_timer_get_time();
+  pulseActive = false;
+  portEXIT_CRITICAL(&pulseMux);
+}
+
+void cancelControl() {
+  if (pulseTimer) esp_timer_stop(pulseTimer);
+  stopMotors();
+  portENTER_CRITICAL(&pulseMux);
+  pulseActive = false;
+  controlToken = 0;
+  portEXIT_CRITICAL(&pulseMux);
+}
+
 bool pinsValid() {
   const int pins[] = {ENA, IN1, IN3, ENB};
-  const int reserved[] = {0, 1, 3, 5, 6, 7, 8, 9, 10, 11, 16, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32, 34, 35, 36, 39};
+  const int reserved[] = {0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 16, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32, 34, 35, 36, 39};
   for (int i = 0; i < 4; i++) {
     if (pins[i] < 0 || pins[i] > 33) return false;
     for (unsigned int j = 0; j < sizeof(reserved) / sizeof(reserved[0]); j++) {
@@ -172,47 +120,146 @@ void configureMotors() {
 }
 
 void handleCapture() {
-  camera_fb_t *frame = esp_camera_fb_get();
+  if (!cameraReady) { server.send(503, "text/plain", "Camera indisponivel"); return; }
+  portENTER_CRITICAL(&pulseMux);
+  const bool moving = pulseActive;
+  const int64_t stoppedUs = pulseStoppedUs;
+  portEXIT_CRITICAL(&pulseMux);
+  if (moving) { server.send(409, "text/plain", "Pulso em andamento"); return; }
+  camera_fb_t *frame = nullptr;
+  int64_t capturedUs = 0;
+  for (int attempt = 0; attempt < 3; ++attempt) {
+    frame = esp_camera_fb_get();
+    if (!frame) break;
+    capturedUs = int64_t(frame->timestamp.tv_sec) * 1000000 + frame->timestamp.tv_usec;
+    const int64_t ageUs = esp_timer_get_time() - capturedUs;
+    if (capturedUs > stoppedUs && ageUs >= 0 && ageUs <= int64_t(FRAME_MAX_AGE_MS) * 1000) break;
+    esp_camera_fb_return(frame);
+    frame = nullptr;
+  }
   if (!frame) {
-    server.send(503, "text/plain", "Falha na captura");
+    server.send(503, "text/plain", "Imagem recente indisponivel");
     return;
   }
+  frameCapturedAt = capturedUs / 1000;
+  if (++lastFrameId == 0) ++lastFrameId;
+  portENTER_CRITICAL(&pulseMux);
+  frameAfterSeq = completedSeq;
+  portEXIT_CRITICAL(&pulseMux);
+  server.sendHeader("X-Frame-Id", String(lastFrameId));
   server.setContentLength(frame->len);
   server.sendHeader("Cache-Control", "no-store");
   server.send(200, "image/jpeg", "");
-  server.client().write(frame->buf, frame->len);
+  WiFiClient client = server.client();
+  size_t sent = 0;
+  const unsigned long started = millis();
+  while (sent < frame->len && client.connected() && millis() - started < 300) {
+    const size_t remaining = frame->len - sent;
+    const size_t chunk = remaining > 1024 ? 1024 : remaining;
+    const size_t written = client.write(frame->buf + sent, chunk);
+    if (written) sent += written;
+    else delay(1);
+  }
+  if (sent != frame->len) client.stop();
   esp_camera_fb_return(frame);
 }
 
-void handleCommand() {
-  if (!server.hasArg("left") || !server.hasArg("right")) {
-    server.send(400, "application/json", "{\"error\":\"left e right obrigatorios\"}");
-    return;
+bool readNumber(const char *name, uint32_t maximum, uint32_t &value) {
+  if (!server.hasArg(name)) return false;
+  const String text = server.arg(name);
+  if (text.isEmpty() || text.length() > 10) return false;
+  for (unsigned int i = 0; i < text.length(); ++i) if (!isDigit(text[i])) return false;
+  const unsigned long long parsed = strtoull(text.c_str(), nullptr, 10);
+  if (parsed > maximum) return false;
+  value = static_cast<uint32_t>(parsed);
+  return true;
+}
+
+void handleArm() {
+  if (!motorsEnabled || !pulseTimer || !cameraReady) {
+    server.send(503, "text/plain", "Camera ou motores indisponiveis"); return;
   }
-  const String leftText = server.arg("left");
-  const String rightText = server.arg("right");
-  for (unsigned int i = 0; i < leftText.length(); i++) {
-    if (!isDigit(leftText[i])) { server.send(400, "text/plain", "PWM invalido"); return; }
-  }
-  for (unsigned int i = 0; i < rightText.length(); i++) {
-    if (!isDigit(rightText[i])) { server.send(400, "text/plain", "PWM invalido"); return; }
-  }
-  const int left = leftText.toInt();
-  const int right = rightText.toInt();
-  if (leftText.isEmpty() || rightText.isEmpty() || left < 0 || left > 255 || right < 0 || right > 255) {
-    server.send(400, "text/plain", "PWM fora de 0..255");
-    return;
-  }
+  portENTER_CRITICAL(&pulseMux);
+  const bool moving = pulseActive;
+  portEXIT_CRITICAL(&pulseMux);
+  if (moving || controlToken) { server.send(409, "text/plain", "Sessao ja ativa"); return; }
+  controlToken = esp_random();
+  if (!controlToken) controlToken = 1;
+  lastStepSeq = completedSeq = confirmedSeq = lastUsedFrameId = frameAfterSeq = 0;
+  pulseStoppedAt = 0;
+  pulseStoppedUs = 0;
   lastCommandMs = millis();
-  if (motorsEnabled) {
-    // Os pinos reversos permanecem sempre em LOW: nenhuma manobra de ré.
-    ledcWrite(ENA, left);
-    ledcWrite(ENB, right);
-  } else {
-    stopMotors();
+  server.send(200, "application/json", String("{\"token\":") + controlToken + ",\"motors_enabled\":true}");
+}
+
+void handleStop() {
+  cancelControl();
+  server.send(200, "application/json", "{\"stopped\":true}");
+}
+
+void handleStep() {
+  uint32_t token,seq,frame,left,right,duration;
+  if (!readNumber("token", UINT32_MAX, token) || !readNumber("seq", UINT32_MAX, seq) ||
+      !readNumber("frame", UINT32_MAX, frame) || !readNumber("left", MAX_PWM, left) ||
+      !readNumber("right", MAX_PWM, right) || !readNumber("duration", PULSE_MAX_MS, duration) ||
+      duration < PULSE_MIN_MS) {
+    server.send(400, "text/plain", "Pulso invalido"); return;
   }
-  String result = String("{\"motors_enabled\":") + (motorsEnabled ? "true" : "false") + "}";
-  server.send(200, "application/json", result);
+  portENTER_CRITICAL(&pulseMux);
+  const bool moving = pulseActive;
+  const uint32_t done = completedSeq;
+  portEXIT_CRITICAL(&pulseMux);
+  const unsigned long now = millis();
+  if (!motorsEnabled || !pulseTimer || !controlToken || token != controlToken || moving ||
+      seq != lastStepSeq + 1 || !frame || frame != lastFrameId || frame <= lastUsedFrameId ||
+      frameAfterSeq != done || confirmedSeq != done || now - frameCapturedAt > FRAME_MAX_AGE_MS ||
+      (lastStepSeq && now - pulseStoppedAt < 25)) {
+    server.send(409, "text/plain", "Pulso fora de sequencia ou imagem antiga"); return;
+  }
+  lastStepSeq = seq;
+  lastUsedFrameId = frame;
+  lastCommandMs = now;
+  portENTER_CRITICAL(&pulseMux);
+  pulseActive = true;
+  portEXIT_CRITICAL(&pulseMux);
+  ledcWrite(ENA, left);
+  ledcWrite(ENB, right);
+  if (esp_timer_start_once(pulseTimer, duration * 1000) != ESP_OK) {
+    cancelControl();
+    server.send(500, "text/plain", "Falha no temporizador do pulso"); return;
+  }
+  server.send(200, "application/json", String("{\"seq\":") + seq + ",\"accepted\":true}");
+}
+
+void handleStepStatus() {
+  uint32_t token,seq;
+  if (!readNumber("token", UINT32_MAX, token) || !readNumber("seq", UINT32_MAX, seq) ||
+      !controlToken || token != controlToken || seq != lastStepSeq) {
+    server.send(409, "text/plain", "Sessao ou sequencia invalida"); return;
+  }
+  portENTER_CRITICAL(&pulseMux);
+  const bool moving = pulseActive;
+  const uint32_t done = completedSeq;
+  portEXIT_CRITICAL(&pulseMux);
+  if (!moving && done == seq) confirmedSeq = seq;
+  server.send(200, "application/json", String("{\"seq\":") + seq +
+    ",\"done\":" + (moving || done != seq ? "false" : "true") + ",\"motors_enabled\":true}");
+}
+
+void handleStatus() {
+  portENTER_CRITICAL(&pulseMux);
+  const bool moving = pulseActive;
+  portEXIT_CRITICAL(&pulseMux);
+  char json[220];
+  snprintf(json, sizeof(json),
+           "{\"firmware\":\"camera-pulsos-v1\",\"camera_ready\":%s,"
+           "\"motors_enabled\":%s,\"pulse_active\":%s,\"max_pwm\":%lu,"
+           "\"pulse_min_ms\":%lu,\"pulse_max_ms\":%lu}",
+           cameraReady ? "true" : "false", motorsEnabled ? "true" : "false",
+           moving ? "true" : "false", static_cast<unsigned long>(MAX_PWM),
+           PULSE_MIN_MS, PULSE_MAX_MS);
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "application/json", json);
 }
 
 bool configureCamera() {
@@ -240,7 +287,11 @@ bool configureCamera() {
   config.frame_size = CAMERA_FRAME_SIZE;
   config.jpeg_quality = CAMERA_JPEG_QUALITY;
   config.fb_count = CAMERA_FRAME_BUFFERS;
-  if (esp_camera_init(&config) != ESP_OK) return false;
+  const esp_err_t cameraError = esp_camera_init(&config);
+  if (cameraError != ESP_OK) {
+    Serial.printf("Falha camera: esp_camera_init=0x%x (%s)\n", cameraError, esp_err_to_name(cameraError));
+    return false;
+  }
   sensor_t *sensor = esp_camera_sensor_get();
   if (!sensor || !sensor->set_special_effect || sensor->set_special_effect(sensor, 2) != 0) {
     Serial.println("Aviso: o sensor nao confirmou o efeito em tons de cinza.");
@@ -250,28 +301,47 @@ bool configureCamera() {
 
 void setup() {
   Serial.begin(115200);
+  delay(300);
+  Serial.println("Inicializando camera-pulsos-v1...");
+  pinMode(4, OUTPUT); // Flash da camera desligado.
+  digitalWrite(4, LOW);
   configureMotors();
-  if (!configureCamera()) {
-    Serial.println("Falha ao iniciar camera. Confira o modelo e a alimentacao.");
-    return;
+  esp_timer_create_args_t timerConfig = {};
+  timerConfig.callback = pulseTimerCallback;
+  timerConfig.name = "fim_pulso";
+  if (esp_timer_create(&timerConfig, &pulseTimer) != ESP_OK) {
+    stopMotors();
+    motorsEnabled = false;
+    Serial.println("Falha no temporizador dos motores.");
   }
-  WiFi.mode(WIFI_AP);
-  WiFi.softAP(AP_SSID, AP_PASSWORD);
-  Serial.print("Wi-Fi: ");
-  Serial.println(WiFi.softAPIP());
+  if (!WiFi.mode(WIFI_AP)) {
+    Serial.println("Falha: WiFi.mode(WIFI_AP) nao iniciou.");
+  } else if (!WiFi.softAP(AP_SSID, AP_PASSWORD)) {
+    Serial.printf("Falha: nao foi possivel criar a rede '%s'.\n", AP_SSID);
+  } else {
+    Serial.printf("Wi-Fi iniciado: SSID='%s' | IP=http://%s\n",
+                  AP_SSID, WiFi.softAPIP().toString().c_str());
+  }
+  cameraReady = configureCamera();
+  if (!cameraReady) Serial.println("Wi-Fi segue ativo; captura de imagem indisponivel.");
   server.on("/", HTTP_GET, []() {
     server.sendHeader("Cache-Control", "no-store");
-    String page = INDEX_HTML;
-    page.replace("__VELOCIDADE__", String(velocidade));
-    server.send(200, "text/html; charset=utf-8", page);
+    server.send(200, "text/plain; charset=utf-8",
+                "ESP32-CAM pronta. No notebook, execute python3 notebook_server.py "
+                "e abra http://127.0.0.1:8765/. Diagnostico: /status");
   });
+  server.on("/status", HTTP_GET, handleStatus);
   server.on("/capture", HTTP_GET, handleCapture);
-  server.on("/command", HTTP_GET, handleCommand);
+  server.on("/arm", HTTP_POST, handleArm);
+  server.on("/stop", HTTP_POST, handleStop);
+  server.on("/step", HTTP_POST, handleStep);
+  server.on("/step-status", HTTP_GET, handleStepStatus);
   server.begin();
+  Serial.println("Servidor HTTP iniciado na porta 80.");
 }
 
 void loop() {
   server.handleClient();
-  if (motorsEnabled && millis() - lastCommandMs > COMMAND_TIMEOUT_MS) stopMotors();
+  if (controlToken && millis() - lastCommandMs > COMMAND_TIMEOUT_MS) cancelControl();
   delay(2);
 }

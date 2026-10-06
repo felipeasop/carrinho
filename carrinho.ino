@@ -3,8 +3,8 @@
 #include "esp_camera.h"
 #include "esp_timer.h"
 
-// Firmware fixo: camera, rede, PWM e confirmacao dos pulsos.
-// O painel e o algoritmo ficam em web/ no notebook.
+// Firmware do carrinho: camera, rede, PWM e confirmacao dos pulsos.
+// O painel e o algoritmo ficam em painel/ no notebook.
 const char *AP_SSID = "carrinho";
 const char *AP_PASSWORD = "carrinho123";
 
@@ -57,7 +57,7 @@ bool pulseActive = false;
 esp_timer_handle_t pulseTimer = nullptr;
 portMUX_TYPE pulseMux = portMUX_INITIALIZER_UNLOCKED;
 
-// A pagina e a visao rodam no notebook (web/app.js).
+// A pagina e a visao rodam no notebook (painel/app.js).
 
 void stopMotors() {
   if (!motorsEnabled) return;
@@ -252,7 +252,7 @@ void handleStatus() {
   portEXIT_CRITICAL(&pulseMux);
   char json[220];
   snprintf(json, sizeof(json),
-           "{\"firmware\":\"camera-pulsos-v1\",\"camera_ready\":%s,"
+           "{\"camera_ready\":%s,"
            "\"motors_enabled\":%s,\"pulse_active\":%s,\"max_pwm\":%lu,"
            "\"pulse_min_ms\":%lu,\"pulse_max_ms\":%lu}",
            cameraReady ? "true" : "false", motorsEnabled ? "true" : "false",
@@ -302,7 +302,7 @@ bool configureCamera() {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("Inicializando camera-pulsos-v1...");
+  Serial.println("Inicializando firmware do carrinho...");
   pinMode(4, OUTPUT); // Flash da camera desligado.
   digitalWrite(4, LOW);
   configureMotors();

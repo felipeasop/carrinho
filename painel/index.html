@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Carrinho seguidor de linha</title><style>
+:root{font-family:system-ui,sans-serif;color-scheme:dark;background:#101820;color:#eaf2f5}body{max-width:900px;margin:auto;padding:18px}
+.panel{background:#192731;border:1px solid #36505a;border-radius:12px;padding:16px}canvas{display:block;width:100%;background:#090d10;border-radius:8px;image-rendering:auto}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px;margin-top:14px}.stat{border:1px solid #36505a;border-radius:8px;padding:10px}.stat span{display:block;color:#adc1ca;font-size:.85rem}.stat strong{display:block;margin-top:4px}
+label{display:block;margin:16px 0 6px}input[type=range]{width:100%}#error{color:#ffb5a8;min-height:1.4em}.hint{color:#adc1ca;font-size:.9rem}
+.capture-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:14px 0}.capture-controls button{background:#27768a;color:white;border:0;border-radius:7px;padding:9px 12px;cursor:pointer}.capture-controls button:disabled{opacity:.5;cursor:default}
+.stop-button{background:#c84444;color:white;border:0;border-radius:7px;padding:10px 18px;font-weight:bold;cursor:pointer}
+.start-button{background:#328963;color:white;border:0;border-radius:7px;padding:10px 18px;font-weight:bold;cursor:pointer}.start-button:disabled{opacity:.5;cursor:default}.speed-limits{display:flex;justify-content:space-between;color:#adc1ca;font-size:.85rem}.drive-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px}
+details{margin-top:14px}#diagnosticOutput{white-space:pre-wrap;overflow-wrap:anywhere;max-height:360px;overflow:auto;background:#0b1217;padding:10px;border-radius:7px;font-size:.82rem}
+dialog{max-width:520px;width:calc(100% - 32px);border:1px solid #55717b;border-radius:12px;background:#192731;color:#eaf2f5;padding:20px}dialog::backdrop{background:#000b}dialog label{margin:14px 0 6px}dialog select,dialog textarea{width:100%;padding:9px;border-radius:6px;border:1px solid #55717b;background:#101820;color:inherit}dialog textarea{min-height:90px;resize:vertical}dialog button{background:#27768a;color:white;border:0;border-radius:7px;padding:10px 14px;cursor:pointer}
+</style></head><body><h1>Carrinho seguidor de linha</h1>
+<p class="hint">Painel local no notebook · visão centro-borda · câmera baixa. A imagem é analisada neste navegador; a ESP32 transmite JPEG e recebe PWM pela rede. Feche outras abas do carrinho antes de iniciar.</p>
+<main class="panel"><canvas id="video" width="160" height="120"></canvas>
+<label for="speed">Velocidade selecionada: <strong><span id="speedValue">130</span> PWM</strong></label>
+<input id="speed" type="range" min="130" max="200" value="130"><div class="speed-limits"><span>130 PWM</span><span>200 PWM</span></div>
+<div class="drive-controls"><button id="startNow" class="start-button" type="button" disabled>INICIAR</button><button id="stopNow" class="stop-button" type="button">PARAR (PWM 0)</button><span id="driveState" class="hint">Parado · PWM 0</span></div>
+<p id="speedNote" class="hint">Selecione entre 130 e 200 PWM e clique INICIAR. PARAR zera os motores; a seleção permanece na barra. O controle prioriza a fita próxima.</p>
+<p id="planState" class="hint">Comando: aguardando imagem</p>
+<p id="visionState" class="hint">Visão: aguardando imagem</p>
+<div class="capture-controls"><button id="record" type="button">Iniciar gravação</button><button id="snapshot" type="button" disabled>Salvar print</button><button id="calibrate" type="button" disabled>Calibrar centro</button><button id="motorTest" type="button" disabled>Testar motores</button><span id="captureStatus" class="hint">Aguardando imagem</span></div>
+<p class="hint">Ao encerrar, o vídeo para primeiro. Em seguida, a página pede uma avaliação obrigatória antes de baixar o ZIP.</p>
+<p id="motorTestStatus" class="hint">Teste: deixe o carrinho parado e suspenda as duas rodas motrizes. O teste dá pulsos curtos à esquerda e à direita em PWM 90, 100, 110, 120 e 130; depois testa ambas em 130. Clique novamente para interromper.</p>
+<p class="hint">Após mudar a posição da câmera, pare o carrinho, alinhe a roda dianteira à fita em um trecho reto e clique em Calibrar centro. O botão INICIAR será liberado após essa calibração.</p>
+<div class="grid">
+<div class="stat"><span>Conexão</span><strong id="connection">Conectando</strong></div>
+<div class="stat"><span>Ação</span><strong id="action">Parar</strong></div>
+<div class="stat"><span>Ajuste da curva</span><strong id="amount">0 PWM</strong></div>
+<div class="stat"><span>Roda esquerda</span><strong id="left">0 / 255</strong></div>
+<div class="stat"><span>Roda direita</span><strong id="right">0 / 255</strong></div>
+<div class="stat"><span>Saída dos motores</span><strong id="motorState">—</strong></div>
+<div class="stat"><span>Quadro recebido</span><strong id="frameBytes">—</strong></div>
+<div class="stat"><span>Tempo câmera / comando</span><strong><span id="latency">—</span> / <span id="commandLatency">—</span></strong></div>
+<div class="stat"><span>Quadros por segundo</span><strong id="fps">—</strong></div>
+</div><p id="error"></p><details><summary>Diagnóstico de conexão e motores</summary><p class="hint">Use após uma falha. O diagnóstico local continua disponível mesmo se a ESP32 sair do Wi‑Fi.</p><button id="refreshDiagnostics" type="button">Coletar diagnóstico</button><pre id="diagnosticOutput">Ainda não coletado.</pre></details></main>
+<dialog id="feedbackDialog"><form id="feedbackForm"><h2>Como foi esta run?</h2><p class="hint">A gravação já foi encerrada. Preencha o feedback para salvar o ZIP.</p><label for="runRating">Nota obrigatória</label><select id="runRating" required><option value="">Selecione</option><option value="1">1/5</option><option value="2">2/5</option><option value="3">3/5</option><option value="4">4/5</option><option value="5">5/5</option></select><label for="runNote">O que aconteceu? (obrigatório)</label><textarea id="runNote" maxlength="500" required placeholder="Ex.: seguiu reto, mas perdeu a curva à direita; precisei reposicionar o carrinho."></textarea><label><input id="runAssisted" type="checkbox"> Intervim/reposicionei o carrinho durante a run</label><p><button type="submit">Salvar gravação</button></p></form></dialog>
+<script type="module" src="/app.js"></script></body></html>

@@ -79,10 +79,19 @@ class Handler(BaseHTTPRequestHandler):
         route = urlsplit(self.path)
         if self.command == "GET" and route.path == "/diagnostico":
             with EVENTS_LOCK:
-                payload = {"server": "notebook_server.py", "uptime_s": round(time.time() - STARTED_AT, 1),
-                           "requests": REQUEST_COUNT, "failures": FAILURE_COUNT, "esp_url": self.esp_url,
-                           "recent": list(EVENTS)}
-            self.send_data(200, json.dumps(payload, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                payload = {
+                    "server": "notebook_server.py",
+                    "uptime_s": round(time.time() - STARTED_AT, 1),
+                    "requests": REQUEST_COUNT,
+                    "failures": FAILURE_COUNT,
+                    "esp_url": self.esp_url,
+                    "recent": list(EVENTS),
+                }
+            self.send_data(
+                200,
+                json.dumps(payload, ensure_ascii=False).encode(),
+                "application/json; charset=utf-8",
+            )
             return
         if (self.command, route.path) in ROUTES:
             self.proxy(route)
@@ -151,9 +160,19 @@ class Handler(BaseHTTPRequestHandler):
         if not delivered:
             result += "+browser_disconnected"
         elapsed = round((time.monotonic() - started) * 1000, 1)
-        record_event({"time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "method": self.command,
-                      "path": route.path, "status": status, "result": result, "elapsed_ms": elapsed,
-                      "client": self.client_address[0], "frame_id": frame_id, "detail": detail})
+        record_event(
+            {
+                "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "method": self.command,
+                "path": route.path,
+                "status": status,
+                "result": result,
+                "elapsed_ms": elapsed,
+                "client": self.client_address[0],
+                "frame_id": frame_id,
+                "detail": detail,
+            }
+        )
 
 
 def main():

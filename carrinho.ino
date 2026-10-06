@@ -1,20 +1,21 @@
-#include <WiFi.h>
 #include <WebServer.h>
+#include <WiFi.h>
+
 #include "esp_camera.h"
 #include "esp_timer.h"
 
 // Firmware do carrinho: camera, rede, PWM e confirmacao dos pulsos.
 // O painel e o algoritmo ficam em painel/ no notebook.
-const char *AP_SSID = "carrinho";
-const char *AP_PASSWORD = "carrinho123";
+const char* AP_SSID = "carrinho";
+const char* AP_PASSWORD = "carrinho123";
 
 // L298N: PWM nas entradas ENA/ENB; IN1/IN3 fixam o sentido para frente.
 // IN2/IN4 não são usados pelo programa. Não há comando de ré.
 // Deixe -1 para testar somente câmera/rede. Preencha para usar o carrinho.
-const int ENA = 2; // PWM da roda esquerda
-const int IN1 = 14; // direção fixa para frente, roda esquerda
-const int IN3 = 13; // direção fixa para frente, roda direita
-const int ENB = 12; // PWM da roda direita
+const int ENA = 2;   // PWM da roda esquerda
+const int IN1 = 14;  // direção fixa para frente, roda esquerda
+const int IN3 = 13;  // direção fixa para frente, roda direita
+const int ENB = 12;  // PWM da roda direita
 
 // Cada pulso termina na ESP32, mesmo se o navegador ou a rede travarem.
 const unsigned long COMMAND_TIMEOUT_MS = 1200;
@@ -42,7 +43,7 @@ const uint32_t MAX_PWM = 255;
 #define CAM_PCLK 22
 
 // Camera: imagem pequena e monocromatica para reduzir trafego.
-const framesize_t CAMERA_FRAME_SIZE = FRAMESIZE_QQVGA; // 160 x 120
+const framesize_t CAMERA_FRAME_SIZE = FRAMESIZE_QQVGA;  // 160 x 120
 const int CAMERA_JPEG_QUALITY = 25;
 const int CAMERA_FRAME_BUFFERS = 1;
 
@@ -60,12 +61,13 @@ portMUX_TYPE pulseMux = portMUX_INITIALIZER_UNLOCKED;
 // A pagina e a visao rodam no notebook (painel/app.js).
 
 void stopMotors() {
-  if (!motorsEnabled) return;
+  if (!motorsEnabled)
+    return;
   ledcWrite(ENA, 0);
   ledcWrite(ENB, 0);
 }
 
-void pulseTimerCallback(void *) {
+void pulseTimerCallback(void*) {
   stopMotors();
   portENTER_CRITICAL(&pulseMux);
   completedSeq = lastStepSeq;
@@ -76,7 +78,8 @@ void pulseTimerCallback(void *) {
 }
 
 void cancelControl() {
-  if (pulseTimer) esp_timer_stop(pulseTimer);
+  if (pulseTimer)
+    esp_timer_stop(pulseTimer);
   stopMotors();
   portENTER_CRITICAL(&pulseMux);
   pulseActive = false;
@@ -86,14 +89,18 @@ void cancelControl() {
 
 bool pinsValid() {
   const int pins[] = {ENA, IN1, IN3, ENB};
-  const int reserved[] = {0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 16, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32, 34, 35, 36, 39};
+  const int reserved[] = {0,  1,  3,  4,  5,  6,  7,  8,  9,  10, 11, 16, 17,
+                          18, 19, 21, 22, 23, 25, 26, 27, 32, 34, 35, 36, 39};
   for (int i = 0; i < 4; i++) {
-    if (pins[i] < 0 || pins[i] > 33) return false;
+    if (pins[i] < 0 || pins[i] > 33)
+      return false;
     for (unsigned int j = 0; j < sizeof(reserved) / sizeof(reserved[0]); j++) {
-      if (pins[i] == reserved[j]) return false;
+      if (pins[i] == reserved[j])
+        return false;
     }
     for (int j = i + 1; j < 4; j++) {
-      if (pins[i] == pins[j]) return false;
+      if (pins[i] == pins[j])
+        return false;
     }
   }
   return true;
@@ -110,8 +117,7 @@ void configureMotors() {
   digitalWrite(IN1, HIGH);
   digitalWrite(IN3, HIGH);
   // A camera usa o canal LEDC 0; reservar canais separados para ENA e ENB.
-  if (!ledcAttachChannel(ENA, 1000, 8, 2) ||
-      !ledcAttachChannel(ENB, 1000, 8, 3)) {
+  if (!ledcAttachChannel(ENA, 1000, 8, 2) || !ledcAttachChannel(ENB, 1000, 8, 3)) {
     motorsEnabled = false;
     Serial.println("Falha ao configurar PWM.");
     return;
@@ -120,20 +126,28 @@ void configureMotors() {
 }
 
 void handleCapture() {
-  if (!cameraReady) { server.send(503, "text/plain", "Camera indisponivel"); return; }
+  if (!cameraReady) {
+    server.send(503, "text/plain", "Camera indisponivel");
+    return;
+  }
   portENTER_CRITICAL(&pulseMux);
   const bool moving = pulseActive;
   const int64_t stoppedUs = pulseStoppedUs;
   portEXIT_CRITICAL(&pulseMux);
-  if (moving) { server.send(409, "text/plain", "Pulso em andamento"); return; }
-  camera_fb_t *frame = nullptr;
+  if (moving) {
+    server.send(409, "text/plain", "Pulso em andamento");
+    return;
+  }
+  camera_fb_t* frame = nullptr;
   int64_t capturedUs = 0;
   for (int attempt = 0; attempt < 3; ++attempt) {
     frame = esp_camera_fb_get();
-    if (!frame) break;
+    if (!frame)
+      break;
     capturedUs = int64_t(frame->timestamp.tv_sec) * 1000000 + frame->timestamp.tv_usec;
     const int64_t ageUs = esp_timer_get_time() - capturedUs;
-    if (capturedUs > stoppedUs && ageUs >= 0 && ageUs <= int64_t(FRAME_MAX_AGE_MS) * 1000) break;
+    if (capturedUs > stoppedUs && ageUs >= 0 && ageUs <= int64_t(FRAME_MAX_AGE_MS) * 1000)
+      break;
     esp_camera_fb_return(frame);
     frame = nullptr;
   }
@@ -142,7 +156,8 @@ void handleCapture() {
     return;
   }
   frameCapturedAt = capturedUs / 1000;
-  if (++lastFrameId == 0) ++lastFrameId;
+  if (++lastFrameId == 0)
+    ++lastFrameId;
   portENTER_CRITICAL(&pulseMux);
   frameAfterSeq = completedSeq;
   portEXIT_CRITICAL(&pulseMux);
@@ -157,39 +172,53 @@ void handleCapture() {
     const size_t remaining = frame->len - sent;
     const size_t chunk = remaining > 1024 ? 1024 : remaining;
     const size_t written = client.write(frame->buf + sent, chunk);
-    if (written) sent += written;
-    else delay(1);
+    if (written)
+      sent += written;
+    else
+      delay(1);
   }
-  if (sent != frame->len) client.stop();
+  if (sent != frame->len)
+    client.stop();
   esp_camera_fb_return(frame);
 }
 
-bool readNumber(const char *name, uint32_t maximum, uint32_t &value) {
-  if (!server.hasArg(name)) return false;
+bool readNumber(const char* name, uint32_t maximum, uint32_t& value) {
+  if (!server.hasArg(name))
+    return false;
   const String text = server.arg(name);
-  if (text.isEmpty() || text.length() > 10) return false;
-  for (unsigned int i = 0; i < text.length(); ++i) if (!isDigit(text[i])) return false;
+  if (text.isEmpty() || text.length() > 10)
+    return false;
+  for (unsigned int i = 0; i < text.length(); ++i)
+    if (!isDigit(text[i]))
+      return false;
   const unsigned long long parsed = strtoull(text.c_str(), nullptr, 10);
-  if (parsed > maximum) return false;
+  if (parsed > maximum)
+    return false;
   value = static_cast<uint32_t>(parsed);
   return true;
 }
 
 void handleArm() {
   if (!motorsEnabled || !pulseTimer || !cameraReady) {
-    server.send(503, "text/plain", "Camera ou motores indisponiveis"); return;
+    server.send(503, "text/plain", "Camera ou motores indisponiveis");
+    return;
   }
   portENTER_CRITICAL(&pulseMux);
   const bool moving = pulseActive;
   portEXIT_CRITICAL(&pulseMux);
-  if (moving || controlToken) { server.send(409, "text/plain", "Sessao ja ativa"); return; }
+  if (moving || controlToken) {
+    server.send(409, "text/plain", "Sessao ja ativa");
+    return;
+  }
   controlToken = esp_random();
-  if (!controlToken) controlToken = 1;
+  if (!controlToken)
+    controlToken = 1;
   lastStepSeq = completedSeq = confirmedSeq = lastUsedFrameId = frameAfterSeq = 0;
   pulseStoppedAt = 0;
   pulseStoppedUs = 0;
   lastCommandMs = millis();
-  server.send(200, "application/json", String("{\"token\":") + controlToken + ",\"motors_enabled\":true}");
+  server.send(
+    200, "application/json", String("{\"token\":") + controlToken + ",\"motors_enabled\":true}");
 }
 
 void handleStop() {
@@ -198,12 +227,13 @@ void handleStop() {
 }
 
 void handleStep() {
-  uint32_t token,seq,frame,left,right,duration;
+  uint32_t token, seq, frame, left, right, duration;
   if (!readNumber("token", UINT32_MAX, token) || !readNumber("seq", UINT32_MAX, seq) ||
       !readNumber("frame", UINT32_MAX, frame) || !readNumber("left", MAX_PWM, left) ||
       !readNumber("right", MAX_PWM, right) || !readNumber("duration", PULSE_MAX_MS, duration) ||
       duration < PULSE_MIN_MS) {
-    server.send(400, "text/plain", "Pulso invalido"); return;
+    server.send(400, "text/plain", "Pulso invalido");
+    return;
   }
   portENTER_CRITICAL(&pulseMux);
   const bool moving = pulseActive;
@@ -214,7 +244,8 @@ void handleStep() {
       seq != lastStepSeq + 1 || !frame || frame != lastFrameId || frame <= lastUsedFrameId ||
       frameAfterSeq != done || confirmedSeq != done || now - frameCapturedAt > FRAME_MAX_AGE_MS ||
       (lastStepSeq && now - pulseStoppedAt < 25)) {
-    server.send(409, "text/plain", "Pulso fora de sequencia ou imagem antiga"); return;
+    server.send(409, "text/plain", "Pulso fora de sequencia ou imagem antiga");
+    return;
   }
   lastStepSeq = seq;
   lastUsedFrameId = frame;
@@ -226,24 +257,29 @@ void handleStep() {
   ledcWrite(ENB, right);
   if (esp_timer_start_once(pulseTimer, duration * 1000) != ESP_OK) {
     cancelControl();
-    server.send(500, "text/plain", "Falha no temporizador do pulso"); return;
+    server.send(500, "text/plain", "Falha no temporizador do pulso");
+    return;
   }
   server.send(200, "application/json", String("{\"seq\":") + seq + ",\"accepted\":true}");
 }
 
 void handleStepStatus() {
-  uint32_t token,seq;
+  uint32_t token, seq;
   if (!readNumber("token", UINT32_MAX, token) || !readNumber("seq", UINT32_MAX, seq) ||
       !controlToken || token != controlToken || seq != lastStepSeq) {
-    server.send(409, "text/plain", "Sessao ou sequencia invalida"); return;
+    server.send(409, "text/plain", "Sessao ou sequencia invalida");
+    return;
   }
   portENTER_CRITICAL(&pulseMux);
   const bool moving = pulseActive;
   const uint32_t done = completedSeq;
   portEXIT_CRITICAL(&pulseMux);
-  if (!moving && done == seq) confirmedSeq = seq;
-  server.send(200, "application/json", String("{\"seq\":") + seq +
-    ",\"done\":" + (moving || done != seq ? "false" : "true") + ",\"motors_enabled\":true}");
+  if (!moving && done == seq)
+    confirmedSeq = seq;
+  server.send(200,
+              "application/json",
+              String("{\"seq\":") + seq + ",\"done\":" +
+                (moving || done != seq ? "false" : "true") + ",\"motors_enabled\":true}");
 }
 
 void handleStatus() {
@@ -251,13 +287,17 @@ void handleStatus() {
   const bool moving = pulseActive;
   portEXIT_CRITICAL(&pulseMux);
   char json[220];
-  snprintf(json, sizeof(json),
+  snprintf(json,
+           sizeof(json),
            "{\"camera_ready\":%s,"
            "\"motors_enabled\":%s,\"pulse_active\":%s,\"max_pwm\":%lu,"
            "\"pulse_min_ms\":%lu,\"pulse_max_ms\":%lu}",
-           cameraReady ? "true" : "false", motorsEnabled ? "true" : "false",
-           moving ? "true" : "false", static_cast<unsigned long>(MAX_PWM),
-           PULSE_MIN_MS, PULSE_MAX_MS);
+           cameraReady ? "true" : "false",
+           motorsEnabled ? "true" : "false",
+           moving ? "true" : "false",
+           static_cast<unsigned long>(MAX_PWM),
+           PULSE_MIN_MS,
+           PULSE_MAX_MS);
   server.sendHeader("Cache-Control", "no-store");
   server.send(200, "application/json", json);
 }
@@ -289,10 +329,11 @@ bool configureCamera() {
   config.fb_count = CAMERA_FRAME_BUFFERS;
   const esp_err_t cameraError = esp_camera_init(&config);
   if (cameraError != ESP_OK) {
-    Serial.printf("Falha camera: esp_camera_init=0x%x (%s)\n", cameraError, esp_err_to_name(cameraError));
+    Serial.printf(
+      "Falha camera: esp_camera_init=0x%x (%s)\n", cameraError, esp_err_to_name(cameraError));
     return false;
   }
-  sensor_t *sensor = esp_camera_sensor_get();
+  sensor_t* sensor = esp_camera_sensor_get();
   if (!sensor || !sensor->set_special_effect || sensor->set_special_effect(sensor, 2) != 0) {
     Serial.println("Aviso: o sensor nao confirmou o efeito em tons de cinza.");
   }
@@ -303,7 +344,7 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.println("Inicializando firmware do carrinho...");
-  pinMode(4, OUTPUT); // Flash da camera desligado.
+  pinMode(4, OUTPUT);  // Flash da camera desligado.
   digitalWrite(4, LOW);
   configureMotors();
   esp_timer_create_args_t timerConfig = {};
@@ -319,14 +360,16 @@ void setup() {
   } else if (!WiFi.softAP(AP_SSID, AP_PASSWORD)) {
     Serial.printf("Falha: nao foi possivel criar a rede '%s'.\n", AP_SSID);
   } else {
-    Serial.printf("Wi-Fi iniciado: SSID='%s' | IP=http://%s\n",
-                  AP_SSID, WiFi.softAPIP().toString().c_str());
+    Serial.printf(
+      "Wi-Fi iniciado: SSID='%s' | IP=http://%s\n", AP_SSID, WiFi.softAPIP().toString().c_str());
   }
   cameraReady = configureCamera();
-  if (!cameraReady) Serial.println("Wi-Fi segue ativo; captura de imagem indisponivel.");
+  if (!cameraReady)
+    Serial.println("Wi-Fi segue ativo; captura de imagem indisponivel.");
   server.on("/", HTTP_GET, []() {
     server.sendHeader("Cache-Control", "no-store");
-    server.send(200, "text/plain; charset=utf-8",
+    server.send(200,
+                "text/plain; charset=utf-8",
                 "ESP32-CAM pronta. No notebook, execute python3 notebook_server.py "
                 "e abra http://127.0.0.1:8765/. Diagnostico: /status");
   });
@@ -342,6 +385,7 @@ void setup() {
 
 void loop() {
   server.handleClient();
-  if (controlToken && millis() - lastCommandMs > COMMAND_TIMEOUT_MS) cancelControl();
+  if (controlToken && millis() - lastCommandMs > COMMAND_TIMEOUT_MS)
+    cancelControl();
   delay(2);
 }
